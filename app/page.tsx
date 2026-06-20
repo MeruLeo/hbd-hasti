@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import TextType from "@/components/text-type";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import Image from "next/image";
+import TextType from "@/components/text-type";
 
 // ─── نوع‌های صحنه ────────────────────────────────────────────────
 type SceneWithImage = {
@@ -70,23 +71,51 @@ const SCENES: Scene[] = [
 ];
 
 const TYPING_SPEED = 100;
+const EMPHASIS_TYPING_SPEED = 120;
 
 // ─── Stage ────────────────────────────────────────────────────────
-// FIX 1: "done" از phase خارج شد و به stage اضافه شد
-type Stage =
-  | "waiting"
-  | "image-in"
-  | { scene: number; phase: "typing" | "button" }
-  | "image-out"
-  | "done";
+type SceneStage = {
+  scene: number;
+  phase: "typing" | "button";
+};
+
+type Stage = "waiting" | "image-in" | "image-out" | "done" | SceneStage;
 
 // ─── Helpers ──────────────────────────────────────────────────────
-function calcLastSentenceDelay(texts: string[], typingSpeed: number) {
-  return texts[texts.length - 1].length * typingSpeed + 600;
+function isSceneStage(stage: Stage): stage is SceneStage {
+  return typeof stage === "object";
 }
 
-function getNextPhase(scene: Scene): "button" | "done" {
-  return "buttonLabel" in scene && scene.buttonLabel ? "button" : "done";
+function hasButton(scene: Scene) {
+  return "buttonLabel" in scene && Boolean(scene.buttonLabel);
+}
+
+function getTypingSpeed(scene: Scene) {
+  return scene.type === "dramatic" && scene.emphasis
+    ? EMPHASIS_TYPING_SPEED
+    : TYPING_SPEED;
+}
+
+function calcLastSentenceDelay(texts: string[], typingSpeed: number) {
+  const lastSentence = texts[texts.length - 1] ?? "";
+  return lastSentence.length * typingSpeed + 600;
+}
+
+function getStageAfterTyping(sceneIndex: number): Stage {
+  const scene = SCENES[sceneIndex];
+
+  if (!scene) {
+    return "done";
+  }
+
+  if (hasButton(scene)) {
+    return {
+      scene: sceneIndex,
+      phase: "button",
+    };
+  }
+
+  return "done";
 }
 
 // ─── FadeIn wrapper ───────────────────────────────────────────────
@@ -96,16 +125,23 @@ function FadeIn({
   duration = 1000,
   delay = 50,
 }: {
-  children: React.ReactNode;
+  children: ReactNode;
   className?: string;
   duration?: number;
   delay?: number;
 }) {
   const [visible, setVisible] = useState(false);
+
   useEffect(() => {
-    const t = setTimeout(() => setVisible(true), delay);
-    return () => clearTimeout(t);
+    const timer = window.setTimeout(() => {
+      setVisible(true);
+    }, delay);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
   }, [delay]);
+
   return (
     <div
       className={className}
@@ -124,75 +160,134 @@ export default function Home() {
   const [stage, setStage] = useState<Stage>("waiting");
   const [imageOpacity, setImageOpacity] = useState(0);
 
-  // ۳ ثانیه → fade in عکس
+  const sentenceTimerRef = useRef<number | null>(null);
+
+  const clearSentenceTimer = useCallback(() => {
+    if (sentenceTimerRef.current !== null) {
+      window.clearTimeout(sentenceTimerRef.current);
+      sentenceTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleStageAfterTyping = useCallback(
+    (sceneIndex: number) => {
+      clearSentenceTimer();
+
+      const scene = SCENES[sceneIndex];
+      const delay = scene
+        ? calcLastSentenceDelay(scene.texts, getTypingSpeed(scene))
+        : 0;
+
+      sentenceTimerRef.current = window.setTimeout(() => {
+        setStage(getStageAfterTyping(sceneIndex));
+        sentenceTimerRef.current = null;
+      }, delay);
+    },
+    [clearSentenceTimer],
+  );
+
+  // ۳ ثانیه بعد از ورود صفحه، عکس fade in می‌شود.
   useEffect(() => {
-    const t = setTimeout(() => {
+    const timer = window.setTimeout(() => {
       setStage("image-in");
       setImageOpacity(1);
     }, 3000);
-    return () => clearTimeout(t);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
   }, []);
 
-  // ۱ ثانیه بعد از fade in عکس → صحنه اول
+  // ۱ ثانیه بعد از fade in عکس، صحنه اول شروع می‌شود.
   useEffect(() => {
     if (stage !== "image-in") return;
-    const t = setTimeout(() => setStage({ scene: 0, phase: "typing" }), 1000);
-    return () => clearTimeout(t);
+
+    const timer = window.setTimeout(() => {
+      setStage({
+        scene: 0,
+        phase: "typing",
+      });
+    }, 1000);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
   }, [stage]);
 
-  // FIX 2: setImageOpacity داخل setTimeout تا cascading render نداشته باشیم
+  // در صحنه‌های dramatic، عکس به‌آرامی حذف می‌شود.
   useEffect(() => {
-    if (typeof stage !== "object" || stage.phase !== "typing") return;
-    const currentScene = SCENES[stage.scene];
-    if (currentScene.type !== "dramatic") return;
+    if (!isSceneStage(stage) || stage.phase !== "typing") return;
 
-    const t = setTimeout(() => setImageOpacity(0), 0);
-    return () => clearTimeout(t);
+    const currentScene = SCENES[stage.scene];
+
+    if (!currentScene || currentScene.type !== "dramatic") return;
+
+    const timer = window.setTimeout(() => {
+      setImageOpacity(0);
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
   }, [stage]);
 
-  // FIX 3: تک‌جمله‌ای — حالا getNextPhase درست "button" یا "done" برمیگردونه
+  // صحنه‌های تک‌جمله‌ای onSentenceComplete قابل‌اعتماد ندارند،
+  // بنابراین پایان تایپ آن‌ها با تایمر کنترل می‌شود.
   useEffect(() => {
-    if (typeof stage !== "object" || stage.phase !== "typing") return;
+    if (!isSceneStage(stage) || stage.phase !== "typing") return;
+
     const currentScene = SCENES[stage.scene];
-    if (currentScene.texts.length !== 1) return;
 
-    const delay = calcLastSentenceDelay(currentScene.texts, TYPING_SPEED);
-    const t = setTimeout(() => {
-      setStage({ scene: stage.scene, phase: getNextPhase(currentScene) });
-    }, delay);
-    return () => clearTimeout(t);
-  }, [stage]);
+    if (!currentScene || currentScene.texts.length !== 1) return;
 
-  // چند‌جمله‌ای — وقتی جمله ماقبل آخر پاک شد
-  const handleSentenceComplete =
-    (sceneIndex: number) => (_: string, sentenceIndex: number) => {
+    scheduleStageAfterTyping(stage.scene);
+
+    return () => {
+      clearSentenceTimer();
+    };
+  }, [stage, scheduleStageAfterTyping, clearSentenceTimer]);
+
+  // صحنه‌های چندجمله‌ای: بعد از پایان جمله ماقبل آخر، زمان لازم برای جمله آخر محاسبه می‌شود.
+  const handleSentenceComplete = useCallback(
+    (sceneIndex: number) => (_sentence: string, sentenceIndex: number) => {
       const currentScene = SCENES[sceneIndex];
+
+      if (!currentScene) return;
+      if (currentScene.texts.length <= 1) return;
       if (sentenceIndex !== currentScene.texts.length - 2) return;
 
-      const delay = calcLastSentenceDelay(currentScene.texts, TYPING_SPEED);
-      setTimeout(() => {
-        setStage({ scene: sceneIndex, phase: getNextPhase(currentScene) });
-      }, delay);
-    };
+      scheduleStageAfterTyping(sceneIndex);
+    },
+    [scheduleStageAfterTyping],
+  );
 
-  const handleButtonClick = (currentSceneIndex: number) => {
-    const nextIndex = currentSceneIndex + 1;
-    if (nextIndex < SCENES.length) {
-      setStage({ scene: nextIndex, phase: "typing" });
-    } else {
-      setStage("done");
-    }
-  };
+  const handleButtonClick = useCallback(
+    (currentSceneIndex: number) => {
+      clearSentenceTimer();
 
-  const currentSceneIndex = typeof stage === "object" ? stage.scene : -1;
-  const currentPhase = typeof stage === "object" ? stage.phase : null;
+      const nextIndex = currentSceneIndex + 1;
+
+      if (nextIndex < SCENES.length) {
+        setStage({
+          scene: nextIndex,
+          phase: "typing",
+        });
+      } else {
+        setStage("done");
+      }
+    },
+    [clearSentenceTimer],
+  );
+
+  const currentSceneIndex = isSceneStage(stage) ? stage.scene : -1;
+  const currentPhase = isSceneStage(stage) ? stage.phase : null;
   const currentScene =
     currentSceneIndex >= 0 ? SCENES[currentSceneIndex] : null;
   const isDramatic = currentScene?.type === "dramatic";
 
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 dark:bg-black">
-      <main className="flex font-vazirmatn flex-1 w-full max-w-3xl flex-col items-center py-32 px-16 bg-white dark:bg-black sm:items-start">
+    <div className="flex min-h-screen flex-col items-center justify-center bg-zinc-50 text-zinc-950 dark:bg-black dark:text-zinc-50">
+      <main className="flex w-full max-w-3xl flex-1 flex-col items-center bg-white px-16 py-32 font-vazirmatn dark:bg-black sm:items-start">
         {/* عکس */}
         <div
           style={{
@@ -211,10 +306,10 @@ export default function Home() {
           />
         </div>
 
-        {/* with-image متن */}
+        {/* متن‌های همراه با عکس */}
         {currentScene?.type === "with-image" && (
           <FadeIn key={`scene-${currentSceneIndex}`}>
-            <h1 className="text-3xl">
+            <h1 className="text-3xl leading-relaxed">
               <TextType
                 key={`tt-${currentSceneIndex}`}
                 text={currentScene.texts}
@@ -231,13 +326,13 @@ export default function Home() {
           </FadeIn>
         )}
 
-        {/* dramatic متن */}
+        {/* متن‌های dramatic */}
         {currentScene?.type === "dramatic" && (
           <FadeIn
             key={`dramatic-${currentSceneIndex}`}
             delay={800}
             duration={1500}
-            className="flex flex-col items-center w-full text-center mt-8"
+            className="mt-8 flex w-full flex-col items-center text-center"
           >
             <h1
               className={
@@ -249,7 +344,7 @@ export default function Home() {
               <TextType
                 key={`tt-dramatic-${currentSceneIndex}`}
                 text={currentScene.texts}
-                typingSpeed={currentScene.emphasis ? 120 : TYPING_SPEED}
+                typingSpeed={getTypingSpeed(currentScene)}
                 loop={false}
                 pauseDuration={600}
                 showCursor
@@ -263,29 +358,31 @@ export default function Home() {
         )}
 
         {/* دکمه */}
-        {currentPhase === "button" && currentScene && (
-          <FadeIn
-            key={`btn-${currentSceneIndex}`}
-            className={`mt-10 ${isDramatic ? "self-center" : ""}`}
-          >
-            <button
-              onClick={() => handleButtonClick(currentSceneIndex)}
-              className={`px-8 py-3 font-vazirmatn text-lg rounded-full transition-all duration-300
-              ${
-                isDramatic
-                  ? "border border-black/20 text-black bg-black/5 hover:bg-black/10 dark:border-white/30 dark:text-white dark:bg-white/10 dark:hover:bg-white/20 backdrop-blur-sm"
-                  : "bg-black dark:bg-white text-white dark:text-black hover:opacity-80"
-              }`}
+        {currentPhase === "button" &&
+          currentScene &&
+          hasButton(currentScene) && (
+            <FadeIn
+              key={`btn-${currentSceneIndex}`}
+              className={`mt-10 ${isDramatic ? "self-center" : ""}`}
             >
-              {"buttonLabel" in currentScene && currentScene.buttonLabel}
-            </button>
-          </FadeIn>
-        )}
+              <button
+                type="button"
+                onClick={() => handleButtonClick(currentSceneIndex)}
+                className={`rounded-full px-8 py-3 font-vazirmatn text-lg transition-all duration-300 ${
+                  isDramatic
+                    ? "border border-black/20 bg-black/5 text-black backdrop-blur-sm hover:bg-black/10 dark:border-white/30 dark:bg-white/10 dark:text-white dark:hover:bg-white/20"
+                    : "bg-black text-white hover:opacity-80 dark:bg-white dark:text-black"
+                }`}
+              >
+                {currentScene.buttonLabel}
+              </button>
+            </FadeIn>
+          )}
 
         {/* صحنه پایانی */}
         {stage === "done" && (
           <FadeIn
-            className="flex flex-col items-center w-full text-center mt-16"
+            className="mt-16 flex w-full flex-col items-center text-center"
             delay={300}
           >
             <p className="text-2xl opacity-60">...</p>
