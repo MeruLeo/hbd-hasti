@@ -100,7 +100,7 @@ const SCENES: Scene[] = [
 
 const TYPING_SPEED = 100;
 const EMPHASIS_TYPING_SPEED = 120;
-const CORRECT_PASSWORD = "1234";
+const CORRECT_PASSWORD = "14031225";
 const NEXT_ROUTE = "/world";
 
 // ─── Stage ────────────────────────────────────────────────────────
